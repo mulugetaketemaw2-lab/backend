@@ -14,21 +14,25 @@ const DEFAULT_PORT = parseInt(process.env.PORT) || 5001;
 const USE_IN_MEMORY_DB = process.env.USE_IN_MEMORY_DB === 'true';
 
 // ==================== IMPROVED CORS CONFIGURATION ====================
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://localhost:3002',
-  'http://localhost:3003',
-  'http://localhost:3004',
-  'http://localhost:5173',
-  'http://127.0.0.1:3001',
-  'http://127.0.0.1:5173',
-  'http://192.168.137.66:3001'
-];
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',') 
+  : [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:3002',
+      'http://localhost:3003',
+      'http://localhost:3004',
+      'http://localhost:5173',
+      'http://127.0.0.1:3001',
+      'http://127.0.0.1:5173',
+      'http://192.168.137.66:3001'
+    ];
 
 app.use(cors({
   origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
+    
     if (allowedOrigins.indexOf(origin) === -1) {
       console.log('⚠️ Blocked origin:', origin);
       return callback(null, false);
