@@ -182,7 +182,7 @@ app.get("/api/health", (req, res) => {
 // Import routes with error handling
 console.log("\n📂 Loading routes...");
 
-let authRoutes, memberRoutes, attendanceRoutes, substituteTeacherRoutes, substituteLeaderRoutes, subgroupRoutes, reportRoutes, settingsRoutes, logsRoutes, merjaRoutes, financeRoutes, mezemranRoutes, deaconsRoutes, announcementRoutes, messageRoutes;
+let authRoutes, memberRoutes, attendanceRoutes, substituteTeacherRoutes, substituteLeaderRoutes, subgroupRoutes, reportRoutes, settingsRoutes, logsRoutes, merjaRoutes, financeRoutes, mezemranRoutes, deaconsRoutes, announcementRoutes, messageRoutes, notificationRoutes;
 
 try {
   authRoutes = require("./routes/auth");
@@ -328,6 +328,16 @@ app.use('/api/mezemran', mezemranRoutes);
 app.use('/api/deacons', deaconsRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/messages', messageRoutes);
+
+try {
+  notificationRoutes = require('./routes/notifications');
+  console.log("✅ Notification routes loaded");
+} catch (err) {
+  console.error("❌ Failed to load notification routes:", err.message);
+  notificationRoutes = express.Router();
+}
+
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/executiveMeetings', require('./routes/executiveMeetings'));
 console.log("✅ Routes mounted at /api/*");
 

@@ -1,0 +1,25 @@
+# Environment variables (SENSITIVE - NEVER push to GitHub!)
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Build output
+build/
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Scratch/temp files
+scratch/
+
+# Uploads
+uploads/
