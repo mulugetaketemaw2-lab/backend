@@ -25,6 +25,10 @@ const settingsSchema = new mongoose.Schema({
   registrationNotice: {
     type: String,
     default: ""
+  },
+  terms: {
+    type: [String],
+    default: []
   }
 }, {
   timestamps: true

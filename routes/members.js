@@ -57,13 +57,21 @@ router.post('/self-register', async (req, res) => {
       });
     }
 
-    // Check if student ID, email, or username already registered
+    // Check if student ID or username already registered
     const existingMember = await Member.findOne({ $or: [{ studentId }, { username }] });
+    
     if (existingMember) {
-      if (existingMember.studentId === studentId) {
-        return res.status(400).json({ message: `መታወቂያ ቁጥር "${studentId}" ቀድሞ ተመዝግቧል። (Student ID already registered)` });
+      // If already registered for the CURRENT term
+      if (existingMember.term === memberTerm) {
+        if (existingMember.studentId === studentId) {
+          return res.status(400).json({ message: `መታወቂያ ቁጥር "${studentId}" ቀድሞ ለዚህ ዓመት ተመዝግቧል። (Student ID already registered for this year)` });
+        }
+        return res.status(400).json({ message: `የተጠቃሚ ስም "${username}" ቀድሞ ተመዝግቧል። እባኮ "🔄 New" ቁልፍ ይጫኑ። (Username taken)` });
       }
-      return res.status(400).json({ message: `የተጠቃሚ ስም "${username}" ቀድሞ ተመዝግቧል። እባኮ "🔄 New" ቁልፍ ይጫኑ። (Username taken, click "New" to generate another)` });
+      
+      // If it's an old member registering for a new year, we will UPDATE their existing record
+      // This fulfills the "register as new" requirement for existing members.
+      console.log(`♻️ Existing member ${studentId} registering for new term ${memberTerm}`);
     }
 
     const existingUser = await User.findOne({ email: username });
@@ -71,70 +79,102 @@ router.post('/self-register', async (req, res) => {
       return res.status(400).json({ message: `የተጠቃሚ ስም "${username}" ቀድሞ ተመዝግቧል። እባኮ "🔄 New" ቁልፍ ይጫኑ። (Username taken, click "New" to generate another)` });
     }
 
-    // 1. Create Member entry
-    console.log('📝 Creating Member entry with:', { firstName, studentId, username });
-    const newMember = new Member({
-      firstName,
-      fatherName,
-      grandFatherName,
-      studentId,
-      department,
-      batch,
-      region,
-      zone,
-      woreda,
-      kebele,
-      phone,
-      email, // Optional contact email
-      username, // Login username
-      term: memberTerm,
-      gender,
-      ordination: ordination || 'የለም',
-      serviceDepartment,
-      active: true,
-      isApproved: false,
-      christianName,
-      spiritualFather,
-      isSundaySchoolServed,
-      photo, // Save photo
-      isBegena: isBegena === true || isBegena === 'true',
-      begenaCycle: begenaCycle ? parseInt(begenaCycle, 10) : undefined
-    });
+    // 1. Create/Update Member entry
+    let member;
+    if (existingMember) {
+      member = existingMember;
+      member.firstName = firstName;
+      member.fatherName = fatherName;
+      member.grandFatherName = grandFatherName;
+      member.department = department;
+      member.batch = batch;
+      member.region = region;
+      member.zone = zone;
+      member.woreda = woreda;
+      member.kebele = kebele;
+      member.phone = phone;
+      member.email = email;
+      member.term = memberTerm;
+      member.gender = gender;
+      member.ordination = ordination || 'የለም';
+      member.serviceDepartment = serviceDepartment;
+      member.isApproved = false;
+      member.active = true;
+      member.christianName = christianName;
+      member.spiritualFather = spiritualFather;
+      member.isSundaySchoolServed = isSundaySchoolServed;
+      member.photo = photo;
+      member.isBegena = isBegena === true || isBegena === 'true';
+      member.begenaCycle = begenaCycle ? parseInt(begenaCycle, 10) : undefined;
+      member.addedAt = new Date();
+    } else {
+      member = new Member({
+        firstName, fatherName, grandFatherName, studentId, department, batch,
+        region, zone, woreda, kebele, phone, email, username, term: memberTerm,
+        gender, ordination: ordination || 'የለም', serviceDepartment,
+        active: true, isApproved: false, christianName, spiritualFather,
+        isSundaySchoolServed, photo, 
+        isBegena: isBegena === true || isBegena === 'true',
+        begenaCycle: begenaCycle ? parseInt(begenaCycle, 10) : undefined
+      });
+    }
 
-    // 2. Create User account for the student
-    console.log('👤 Creating User account for:', username);
-    const newUser = new User({
-      name: `${firstName} ${fatherName}`,
-      email: username, // Use username for login
-      password: password,
-      role: 'member',
-      department: 'ትምህርት ክፍል', // Default or assigned later
-      departmentAmharic: serviceDepartment,
-      isApproved: false,
-      memberId: newMember._id
-    });
+    // 2. Create/Update User account
+    let user;
+    if (member.userId) {
+      user = await User.findById(member.userId);
+    } else {
+      user = await User.findOne({ email: username });
+    }
 
-    newMember.userId = newUser._id;
+    if (user) {
+      user.name = `${firstName} ${fatherName}`;
+      user.password = password; // Will be hashed by pre-save hook
+      user.departmentAmharic = serviceDepartment;
+      user.department = serviceDepartment;
+      user.isApproved = false;
+      user.isActive = true;
+      user.memberId = member._id;
+    } else {
+      user = new User({
+        name: `${firstName} ${fatherName}`,
+        email: username,
+        password: password,
+        role: 'member',
+        department: 'ትምህርት ክፍል',
+        departmentAmharic: serviceDepartment,
+        isApproved: false,
+        memberId: member._id
+      });
+    }
+
+    member.userId = user._id;
 
     console.log('💾 Saving Member and User...');
-    try {
-      await Promise.all([newMember.save(), newUser.save()]);
-      console.log('✅ Member and User saved successfully');
-    } catch (saveError) {
-      console.error('❌ Mongoose Save Error:', saveError);
-      throw saveError;
-    }
+    await member.save();
+    await user.save();
 
     // 3. Notify አባላት ጉዳይ department of the new pending registration
     try {
+      // Notify Member Affairs (አባላት ጉዳይ)
       await Notification.create({
-        member: newMember._id,
+        member: member._id,
         department: 'አባላት ጉዳይ',
         title: 'New Member Registration',
         message: `${firstName} ${fatherName} (${studentId}) has registered and is waiting for approval.`,
         type: 'info'
       });
-      console.log('🔔 Notification created for አባላት ጉዳይ');
+      // Also notify the selected department so they are aware of the pending registration
+      if (serviceDepartment && serviceDepartment !== 'አባላት ጉዳይ') {
+        await Notification.create({
+          member: member._id,
+          department: serviceDepartment,
+          title: 'New Department Registration',
+          message: `${firstName} ${fatherName} has registered for your department and is pending approval.`,
+          type: 'info'
+        });
+      }
+      console.log('🔔 Notifications created');
     } catch (notifErr) {
       console.warn('⚠️ Notification creation failed (non-blocking):', notifErr.message);
     }
@@ -160,8 +200,8 @@ router.post('/self-register', async (req, res) => {
 });
 
 // ==================== PROTECTED: GET PENDING APPROVALS ====================
-// Only Abalat Guday or Admin can see pending registrations
-router.get('/pending', authMiddleware, authorize('admin', 'abalat_guday'), async (req, res) => {
+// Only Abalat Guday, Merja or Admin can see pending registrations
+router.get('/pending', authMiddleware, authorize('admin', 'abalat_guday', 'merja', 'super_admin'), async (req, res) => {
   try {
     const { batch, department, gender, search } = req.query;
     let query = { isApproved: false, active: { $ne: false } };
@@ -316,18 +356,26 @@ router.get('/', authMiddleware, async (req, res) => {
     const { term, isBegena } = req.query;
     const { role, departmentAmharic } = req.user;
 
+    const isFullListRequest = req.query.fullList === 'true';
+    const canAccessFullList = ['super_admin', 'admin', 'sebsabi', 'meketel_sebsabi', 'tsehafy', 'abalat_guday', 'hisab', 'audit', 'merja'].includes(role);
+
     let query = {};
     if (term) query.term = term;
     if (isBegena === 'true') query.isBegena = true;
-    // 1. Super Admin, Admin, Sebsabi, Miktil Sebsabi, Tsehafi, or Abalat Guday: Full visibility
-    if (['super_admin', 'admin', 'sebsabi', 'miktil_sebsabi', 'tsehafi', 'abalat_guday'].includes(role)) {
-      // No extra filters
+
+    // ── FULL LIST MODE: Return ALL members across all departments ──
+    if (isFullListRequest && canAccessFullList) {
+      // Show ALL members (approved + pending) in master list
+      console.log(`📋 Full list request by ${role} — returning ALL members`);
+      const members = await Member.find(query).select('-photo').sort({ firstName: 1 });
+      return res.json(members);
     }
-    // 2. Merja: Full visibility for master list if specifically requested
-    else if (role === 'merja' && req.query.fullList === 'true') {
-      query.isApproved = true;
+
+    // ── NORMAL MODE: Role-based filtering ──
+    if (['super_admin', 'admin', 'sebsabi', 'meketel_sebsabi', 'tsehafy', 'abalat_guday', 'hisab', 'audit', 'merja'].includes(role)) {
+      // No extra filters — full visibility (including pending)
     }
-    // 4. Sub-Executives (ንዑስ ተጠሪ): See only their assigned subgroups (Enforced)
+    // Sub-Executives: See only their assigned subgroups
     else if (role === 'sub_executive') {
       const managedSubgroups = await Subgroup.find({ leader: req.user.id });
       if (managedSubgroups.length > 0) {
@@ -335,10 +383,10 @@ router.get('/', authMiddleware, async (req, res) => {
         query._id = { $in: subgroupMemberIds };
         console.log(`🎯 Sub-Executive ${req.user.name} viewing subgroup (${subgroupMemberIds.length} members)`);
       } else {
-        query._id = { $in: [] }; 
+        query._id = { $in: [] };
       }
     }
-    // 5. Department Heads: See only their registered members
+    // Department Heads: See only their registered members
     else {
       const deptMap = {
         'timhirt': 'ትምህርት ክፍል',
@@ -353,9 +401,11 @@ router.get('/', authMiddleware, async (req, res) => {
       const userDept = departmentAmharic || deptMap[role];
       if (userDept) {
         query.serviceDepartment = userDept;
-        console.log(`✅ Dept Head ${req.user.name} viewing department: ${userDept}`);
+        // Dept heads only see APPROVED members
+        query.isApproved = true;
+        console.log(`✅ Dept Head ${req.user.name} viewing approved members in department: ${userDept}`);
       } else {
-        query._id = { $in: [] }; 
+        query._id = { $in: [] };
         console.log(`🚫 Dept Head ${req.user.name} restricted (No department found)`);
       }
     }
@@ -471,6 +521,91 @@ router.get('/stats/summary', authMiddleware, authorize('admin', 'super_admin', '
   } catch (error) {
     console.error('❌ Stats error:', error);
     res.status(500).json({ message: 'Error generating statistics' });
+  }
+});
+
+// ==================== PROTECTED: TRANSITION MEMBERS TO NEW YEAR (BATCH) ====================
+router.post('/transition-batch', authMiddleware, authorize('admin', 'super_admin', 'abalat_guday'), async (req, res) => {
+  try {
+    const { memberIds, targetBatch } = req.body;
+    if (!memberIds || !Array.isArray(memberIds) || memberIds.length === 0) {
+      return res.status(400).json({ message: 'No members selected' });
+    }
+    if (!targetBatch) return res.status(400).json({ message: 'Target batch is required' });
+
+    const settings = await Settings.findOne();
+    const currentTerm = settings?.currentTerm;
+    if (!currentTerm) return res.status(400).json({ message: 'System current term not set' });
+
+    const results = await Member.updateMany(
+      { _id: { $in: memberIds } },
+      { 
+        $set: { 
+          term: currentTerm, 
+          batch: targetBatch, 
+          isApproved: false,
+          active: true,
+          addedAt: new Date()
+        } 
+      }
+    );
+
+    // Also update associated User accounts to reset approval
+    const members = await Member.find({ _id: { $in: memberIds } }).select('userId');
+    const userIds = members.map(m => m.userId).filter(Boolean);
+    if (userIds.length > 0) {
+      await User.updateMany(
+        { _id: { $in: userIds } },
+        { $set: { isApproved: false, isActive: true } }
+      );
+    }
+
+    res.json({ 
+      success: true, 
+      message: `${results.modifiedCount} members transitioned to ${currentTerm} (${targetBatch})`,
+      modifiedCount: results.modifiedCount
+    });
+  } catch (error) {
+    console.error('Batch transition error:', error);
+    res.status(500).json({ message: 'Error transitioning members: ' + error.message });
+  }
+});
+
+// ==================== PROTECTED: SELF TRANSITION TO NEW YEAR ====================
+router.post('/transition-self', authMiddleware, async (req, res) => {
+  try {
+    const { targetBatch } = req.body;
+    if (!targetBatch) return res.status(400).json({ message: 'Please select your new batch' });
+
+    const settings = await Settings.findOne();
+    const currentTerm = settings?.currentTerm;
+    if (!currentTerm) return res.status(400).json({ message: 'System current term not set' });
+
+    const member = await Member.findOne({ userId: req.user.id });
+    if (!member) return res.status(404).json({ message: 'Member record not found' });
+
+    if (member.term === currentTerm) {
+      return res.status(400).json({ message: 'You are already registered for the current year.' });
+    }
+
+    // Update Member
+    member.term = currentTerm;
+    member.batch = targetBatch;
+    member.isApproved = false;
+    member.active = true;
+    member.addedAt = new Date();
+    await member.save();
+
+    // Update User
+    await User.findByIdAndUpdate(req.user.id, { 
+      isApproved: false, 
+      isActive: true 
+    });
+
+    res.json({ success: true, message: `Successfully transitioned to ${currentTerm} as ${targetBatch}. Waiting for approval.` });
+  } catch (error) {
+    console.error('Self transition error:', error);
+    res.status(500).json({ message: 'Error during transition: ' + error.message });
   }
 });
 

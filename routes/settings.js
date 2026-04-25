@@ -70,41 +70,240 @@ router.post('/term', authMiddleware, authorize('super_admin', 'admin'), async (r
 // Yearly Transition Process
 router.post('/transition', authMiddleware, authorize('super_admin', 'admin'), async (req, res) => {
   try {
-    const { newTerm, graduateBatches } = req.body;
-    
-    if (!newTerm) return res.status(400).json({ message: 'New term is required' });
+    const { nextTerm } = req.body;
+    if (!nextTerm) return res.status(400).json({ message: 'Next term string is required' });
 
-    // 1. Update settings
+    // 1. Get current settings to know the "Old Term"
     let settings = await Settings.findOne();
     if (!settings) {
-      settings = new Settings({ currentTerm: newTerm });
-    } else {
-      settings.currentTerm = newTerm;
-      settings.lastTermTransition = Date.now();
+      settings = new Settings({ currentTerm: 'Not Set', terms: [] });
     }
-    await settings.save();
+    const oldTerm = settings.currentTerm;
 
-    // 2. Archive all previous Members (they will re-register for the new term)
+    // 2. Archive all Active Members
     await Member.updateMany(
       { active: true },
       { active: false }
     );
 
-    // 3. Archive all previous Executives and Sub-executives (admins stay to manage the transition)
+    // 3. Archive all Active Users (Executives/Sub-execs)
     await User.updateMany(
       { role: { $nin: ['super_admin', 'admin'] }, isActive: true },
       { isActive: false }
     );
 
-    await createLog(req.user.id, 'YEARLY_TRANSITION', 'SYSTEM', 'Term Management', `Transitioned system to new term: ${newTerm}`, req);
+    // 4. Archive Finance records
+    await Finance.updateMany(
+      { archived: false },
+      { archived: true }
+    );
 
-    res.json({ 
-      message: 'Yearly transition completed. Old data archived.', 
-      term: newTerm
+    // 5. Archive Subgroups
+    await Subgroup.updateMany(
+      { active: true },
+      { active: false }
+    );
+
+    // 6. Update Settings: Set new term and add old term to history
+    settings.currentTerm = nextTerm;
+    
+    // Ensure terms array exists
+    if (!settings.terms) settings.terms = [];
+    
+    if (oldTerm && oldTerm !== 'Not Set' && !settings.terms.includes(oldTerm)) {
+      settings.terms.push(oldTerm);
+    }
+    await settings.save();
+
+    await createLog(
+      req.user.id,
+      'YEARLY_TRANSITION',
+      'SYSTEM',
+      'Term Management',
+      `System transitioned from ${oldTerm} to ${nextTerm}. Previous data archived.`,
+      req
+    );
+
+    res.json({
+      success: true,
+      message: `✅ System successfully transitioned to ${nextTerm}. ${oldTerm} data has been archived to history.`,
+      oldTerm,
+      nextTerm
     });
+
   } catch (error) {
     console.error('Transition error:', error);
-    res.status(500).json({ message: 'Error during transition process' });
+    res.status(500).json({ message: 'Error during transition: ' + error.message });
+  }
+});
+
+
+// ==================== RESTORE ARCHIVED TERM ====================
+// Admin can restore any past term back to active
+router.post('/restore-term', authMiddleware, authorize('super_admin', 'admin'), async (req, res) => {
+  try {
+    const { termToRestore, restoreMembers, restoreUsers, restoreSubgroups, restoreFinance, targetDepartment, setAsCurrent } = req.body;
+
+    if (!termToRestore) return res.status(400).json({ message: 'Term to restore is required' });
+
+    const results = {};
+    const memberQuery = { term: termToRestore, active: false };
+    const financeQuery = { term: termToRestore, archived: true };
+    
+    // Add department filter if provided
+    if (targetDepartment) {
+      memberQuery.serviceDepartment = targetDepartment;
+      financeQuery.department = targetDepartment;
+    }
+
+    // 1. Restore Members
+    if (restoreMembers !== false) {
+      const result = await Member.updateMany(
+        memberQuery,
+        { active: true }
+      );
+      results.members = result.modifiedCount;
+    }
+
+    // 2. Restore Users linked to those members
+    if (restoreUsers !== false) {
+      const termMembers = await Member.find(memberQuery).select('userId');
+      const userIds = termMembers.map(m => m.userId).filter(Boolean);
+      if (userIds.length > 0) {
+        const result = await User.updateMany(
+          { _id: { $in: userIds }, isActive: false },
+          { isActive: true }
+        );
+        results.users = result.modifiedCount;
+      }
+    }
+
+    // 3. Restore Finance records
+    if (restoreFinance !== false) {
+      const result = await Finance.updateMany(
+        financeQuery,
+        { archived: false }
+      );
+      results.finance = result.modifiedCount;
+    }
+
+    // 4. Restore Subgroups (Only if not department specific or if logic allows)
+    if (restoreSubgroups === true) {
+      const subgroupQuery = { active: false };
+      if (targetDepartment) subgroupQuery.department = targetDepartment;
+      const result = await Subgroup.updateMany(
+        subgroupQuery,
+        { active: true }
+      );
+      results.subgroups = result.modifiedCount;
+    }
+
+    // 5. Optionally switch current term back
+    if (setAsCurrent === true) {
+      await Settings.findOneAndUpdate({}, { currentTerm: termToRestore });
+      results.currentTermChanged = true;
+    }
+
+    await createLog(
+      req.user.id,
+      'RESTORE_TERM',
+      'SYSTEM',
+      'Term Management',
+      `Restored term ${termToRestore} ${targetDepartment ? `(Dept: ${targetDepartment})` : ''} to active.`,
+      req
+    );
+
+    res.json({
+      success: true,
+      message: `✅ ${targetDepartment || termToRestore} data restored successfully`,
+      details: results
+    });
+
+  } catch (error) {
+    console.error('Restore term error:', error);
+    res.status(500).json({ message: 'Error restoring term: ' + error.message });
+  }
+});
+
+
+
+// ==================== ARCHIVE/DEACTIVATE TERM ====================
+// Admin can bulk deactivate any term/department (Reverse restore)
+router.post('/archive-term', authMiddleware, authorize('super_admin', 'admin'), async (req, res) => {
+  try {
+    const { termToArchive, archiveMembers, archiveUsers, archiveSubgroups, archiveFinance, targetDepartment } = req.body;
+
+    if (!termToArchive) return res.status(400).json({ message: 'Term to archive is required' });
+
+    const results = {};
+    const memberQuery = { term: termToArchive, active: true };
+    const financeQuery = { term: termToArchive, archived: false };
+    
+    if (targetDepartment) {
+      memberQuery.serviceDepartment = targetDepartment;
+      financeQuery.department = targetDepartment;
+    }
+
+    // 1. Archive Members
+    if (archiveMembers !== false) {
+      const result = await Member.updateMany(
+        memberQuery,
+        { active: false }
+      );
+      results.members = result.modifiedCount;
+    }
+
+    // 2. Archive Users
+    if (archiveUsers !== false) {
+      const termMembers = await Member.find(memberQuery).select('userId');
+      const userIds = termMembers.map(m => m.userId).filter(Boolean);
+      if (userIds.length > 0) {
+        const result = await User.updateMany(
+          { _id: { $in: userIds }, isActive: true },
+          { isActive: false }
+        );
+        results.users = result.modifiedCount;
+      }
+    }
+
+    // 3. Archive Finance
+    if (archiveFinance !== false) {
+      const result = await Finance.updateMany(
+        financeQuery,
+        { archived: true }
+      );
+      results.finance = result.modifiedCount;
+    }
+
+    // 4. Archive Subgroups
+    if (archiveSubgroups === true) {
+      const subgroupQuery = { active: true };
+      if (targetDepartment) subgroupQuery.department = targetDepartment;
+      const result = await Subgroup.updateMany(
+        subgroupQuery,
+        { active: false }
+      );
+      results.subgroups = result.modifiedCount;
+    }
+
+    await createLog(
+      req.user.id,
+      'ARCHIVE_TERM',
+      'SYSTEM',
+      'Term Management',
+      `Archived term ${termToArchive} ${targetDepartment ? `(Dept: ${targetDepartment})` : ''}.`,
+      req
+    );
+
+    res.json({
+      success: true,
+      message: `✅ ${targetDepartment || termToArchive} data archived successfully`,
+      details: results
+    });
+
+  } catch (error) {
+    console.error('Archive term error:', error);
+    res.status(500).json({ message: 'Error archiving term: ' + error.message });
   }
 });
 
@@ -240,7 +439,14 @@ router.patch('/registration-notice', authMiddleware, authorize('super_admin', 'a
     }
     await settings.save();
     
-    await createLog(req.user.id, 'UPDATE_SETTINGS', 'SYSTEM', 'Registration Settings', `Updated registration notice`, req);
+    await createLog(
+      req.user.id, 
+      'UPDATE_SETTINGS', 
+      'SYSTEM', 
+      'Registration Settings', 
+      notice ? `Updated registration notice (length: ${notice.length})` : 'Cleared registration notice', 
+      req
+    );
     
     res.json({ success: true, registrationNotice: settings.registrationNotice, message: 'Registration notice updated successfully' });
   } catch (error) {
